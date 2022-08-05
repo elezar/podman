@@ -43,6 +43,15 @@ const (
 	Dockerv2ImageManifest = define.Dockerv2ImageManifest
 )
 
+// ExtractRootfsOptions is consumed by ExtractRootfs() which allows
+// users to preserve nature of various modes like setuid, setgid and xattrs
+// over the extracted file system objects.
+type ExtractRootfsOptions struct {
+	StripSetuidBit bool // strip the setuid bit off of items being extracted.
+	StripSetgidBit bool // strip the setgid bit off of items being extracted.
+	StripXattrs    bool // don't record extended attributes of items being extracted.
+}
+
 type containerImageRef struct {
 	fromImageName         string
 	fromImageID           string
@@ -61,6 +70,7 @@ type containerImageRef struct {
 	annotations           map[string]string
 	preferredManifestType string
 	squash                bool
+	omitHistory           bool
 	emptyLayer            bool
 	idMappingOptions      *define.IDMappingOptions
 	parent                string
@@ -150,7 +160,10 @@ func computeLayerMIMEType(what string, layerCompression archive.Compression) (om
 }
 
 // Extract the container's whole filesystem as if it were a single layer.
-func (i *containerImageRef) extractRootfs() (io.ReadCloser, chan error, error) {
+// Takes ExtractRootfsOptions as argument which allows caller to configure
+// preserve nature of setuid,setgid,sticky and extended attributes
+// on extracted rootfs.
+func (i *containerImageRef) extractRootfs(opts ExtractRootfsOptions) (io.ReadCloser, chan error, error) {
 	var uidMap, gidMap []idtools.IDMap
 	mountPoint, err := i.store.Mount(i.containerID, i.mountLabel)
 	if err != nil {
@@ -164,8 +177,11 @@ func (i *containerImageRef) extractRootfs() (io.ReadCloser, chan error, error) {
 			uidMap, gidMap = convertRuntimeIDMaps(i.idMappingOptions.UIDMap, i.idMappingOptions.GIDMap)
 		}
 		copierOptions := copier.GetOptions{
-			UIDMap: uidMap,
-			GIDMap: gidMap,
+			UIDMap:         uidMap,
+			GIDMap:         gidMap,
+			StripSetuidBit: opts.StripSetuidBit,
+			StripSetgidBit: opts.StripSetgidBit,
+			StripXattrs:    opts.StripXattrs,
 		}
 		err = copier.Get(mountPoint, mountPoint, copierOptions, []string{"."}, pipeWriter)
 		errChan <- err
@@ -206,7 +222,7 @@ func (i *containerImageRef) createConfigsAndManifests() (v1.Image, v1.Manifest, 
 	oimage.RootFS.DiffIDs = []digest.Digest{}
 	// Only clear the history if we're squashing, otherwise leave it be so that we can append
 	// entries to it.
-	if i.squash {
+	if i.squash || i.omitHistory {
 		oimage.History = []v1.History{}
 	}
 
@@ -229,7 +245,7 @@ func (i *containerImageRef) createConfigsAndManifests() (v1.Image, v1.Manifest, 
 	// Only clear the history if we're squashing, otherwise leave it be so
 	// that we can append entries to it.  Clear the parent, too, we no
 	// longer include its layers and history.
-	if i.squash {
+	if i.squash || i.omitHistory {
 		dimage.Parent = ""
 		dimage.History = []docker.V2S2History{}
 	}
@@ -239,6 +255,7 @@ func (i *containerImageRef) createConfigsAndManifests() (v1.Image, v1.Manifest, 
 		Versioned: specs.Versioned{
 			SchemaVersion: 2,
 		},
+		MediaType: v1.MediaTypeImageManifest,
 		Config: v1.Descriptor{
 			MediaType: v1.MediaTypeImageConfig,
 		},
@@ -375,7 +392,7 @@ func (i *containerImageRef) NewImageSource(ctx context.Context, sc *types.System
 		var errChan chan error
 		if i.squash {
 			// Extract the root filesystem as a single layer.
-			rc, errChan, err = i.extractRootfs()
+			rc, errChan, err = i.extractRootfs(ExtractRootfsOptions{})
 			if err != nil {
 				return nil, err
 			}
@@ -514,43 +531,56 @@ func (i *containerImageRef) NewImageSource(ctx context.Context, sc *types.System
 			dimage.History = append(dimage.History, dnews)
 		}
 	}
-	appendHistory(i.preEmptyLayers)
-	created := time.Now().UTC()
-	if i.created != nil {
-		created = (*i.created).UTC()
-	}
-	comment := i.historyComment
-	// Add a comment for which base image is being used
-	if strings.Contains(i.parent, i.fromImageID) && i.fromImageName != i.fromImageID {
-		comment += "FROM " + i.fromImageName
-	}
-	onews := v1.History{
-		Created:    &created,
-		CreatedBy:  i.createdBy,
-		Author:     oimage.Author,
-		Comment:    comment,
-		EmptyLayer: i.emptyLayer,
-	}
-	oimage.History = append(oimage.History, onews)
-	dnews := docker.V2S2History{
-		Created:    created,
-		CreatedBy:  i.createdBy,
-		Author:     dimage.Author,
-		Comment:    comment,
-		EmptyLayer: i.emptyLayer,
-	}
-	dimage.History = append(dimage.History, dnews)
-	appendHistory(i.postEmptyLayers)
 
-	// Sanity check that we didn't just create a mismatch between non-empty layers in the
-	// history and the number of diffIDs.
-	expectedDiffIDs := expectedOCIDiffIDs(oimage)
-	if len(oimage.RootFS.DiffIDs) != expectedDiffIDs {
-		return nil, errors.Errorf("internal error: history lists %d non-empty layers, but we have %d layers on disk", expectedDiffIDs, len(oimage.RootFS.DiffIDs))
-	}
-	expectedDiffIDs = expectedDockerDiffIDs(dimage)
-	if len(dimage.RootFS.DiffIDs) != expectedDiffIDs {
-		return nil, errors.Errorf("internal error: history lists %d non-empty layers, but we have %d layers on disk", expectedDiffIDs, len(dimage.RootFS.DiffIDs))
+	// Calculate base image history for special scenarios
+	// when base layers does not contains any history.
+	// We will ignore sanity checks if baseImage history is null
+	// but still add new history for docker parity.
+	baseImageHistoryLen := len(oimage.History)
+	// Only attempt to append history if history was not disabled explicitly.
+	if !i.omitHistory {
+		appendHistory(i.preEmptyLayers)
+		created := time.Now().UTC()
+		if i.created != nil {
+			created = (*i.created).UTC()
+		}
+		comment := i.historyComment
+		// Add a comment for which base image is being used
+		if strings.Contains(i.parent, i.fromImageID) && i.fromImageName != i.fromImageID {
+			comment += "FROM " + i.fromImageName
+		}
+		onews := v1.History{
+			Created:    &created,
+			CreatedBy:  i.createdBy,
+			Author:     oimage.Author,
+			Comment:    comment,
+			EmptyLayer: i.emptyLayer,
+		}
+		oimage.History = append(oimage.History, onews)
+		dnews := docker.V2S2History{
+			Created:    created,
+			CreatedBy:  i.createdBy,
+			Author:     dimage.Author,
+			Comment:    comment,
+			EmptyLayer: i.emptyLayer,
+		}
+		dimage.History = append(dimage.History, dnews)
+		appendHistory(i.postEmptyLayers)
+
+		// Sanity check that we didn't just create a mismatch between non-empty layers in the
+		// history and the number of diffIDs. Following sanity check is ignored if build history
+		// is disabled explicitly by the user.
+		// Disable sanity check when baseImageHistory is null for docker parity
+		if baseImageHistoryLen != 0 {
+			expectedDiffIDs := expectedOCIDiffIDs(oimage)
+			if len(oimage.RootFS.DiffIDs) != expectedDiffIDs {
+				return nil, errors.Errorf("internal error: history lists %d non-empty layers, but we have %d layers on disk", expectedDiffIDs, len(oimage.RootFS.DiffIDs))
+			}
+			expectedDiffIDs = expectedDockerDiffIDs(dimage)
+			if len(dimage.RootFS.DiffIDs) != expectedDiffIDs {
+				return nil, errors.Errorf("internal error: history lists %d non-empty layers, but we have %d layers on disk", expectedDiffIDs, len(dimage.RootFS.DiffIDs))
+			}
+		}
 	}
 
 	// Encode the image configuration blob.
@@ -737,7 +767,7 @@ func (i *containerImageSource) GetBlob(ctx context.Context, blob types.BlobInfo,
 	return ioutils.NewReadCloserWrapper(layerReadCloser, closer), size, nil
 }
 
-func (b *Builder) makeImageRef(options CommitOptions) (types.ImageReference, error) {
+func (b *Builder) makeContainerImageRef(options CommitOptions) (*containerImageRef, error) {
 	var name reference.Named
 	container, err := b.store.Container(b.ContainerID)
 	if err != nil {
@@ -751,6 +781,10 @@ func (b *Builder) makeImageRef(options CommitOptions) (types.ImageReference, err
 	manifestType := options.PreferredManifestType
 	if manifestType == "" {
 		manifestType = define.OCIv1ImageManifest
+	}
+
+	for _, u := range options.UnsetEnvs {
+		b.UnsetEnv(u)
 	}
 	oconfig, err := json.Marshal(&b.OCIv1)
 	if err != nil {
@@ -799,6 +833,7 @@ func (b *Builder) makeImageRef(options CommitOptions) (types.ImageReference, err
 		annotations:           b.Annotations(),
 		preferredManifestType: manifestType,
 		squash:                options.Squash,
+		omitHistory:           options.OmitHistory,
 		emptyLayer:            options.EmptyLayer && !options.Squash,
 		idMappingOptions:      &b.IDMappingOptions,
 		parent:                parent,
@@ -807,4 +842,13 @@ func (b *Builder) makeImageRef(options CommitOptions) (types.ImageReference, err
 		postEmptyLayers:       b.AppendedEmptyLayers,
 	}
 	return ref, nil
+}
+
+// Extract the container's whole filesystem as if it were a single layer from current builder instance
+func (b *Builder) ExtractRootfs(options CommitOptions, opts ExtractRootfsOptions) (io.ReadCloser, chan error, error) {
+	src, err := b.makeContainerImageRef(options)
+	if err != nil {
+		return nil, nil, errors.Wrapf(err, "error creating image reference for container %q to extract its contents", b.ContainerID)
+	}
+	return src.extractRootfs(opts)
 }

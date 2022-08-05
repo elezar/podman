@@ -3,6 +3,9 @@
 package chroot
 
 import (
+	"io/ioutil"
+
+	"github.com/containers/common/pkg/seccomp"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
 	libseccomp "github.com/seccomp/libseccomp-golang"
@@ -18,7 +21,7 @@ func setSeccomp(spec *specs.Spec) error {
 	mapAction := func(specAction specs.LinuxSeccompAction, errnoRet *uint) libseccomp.ScmpAction {
 		switch specAction {
 		case specs.ActKill:
-			return libseccomp.ActKill
+			return libseccomp.ActKillThread
 		case specs.ActTrap:
 			return libseccomp.ActTrap
 		case specs.ActErrno:
@@ -105,7 +108,7 @@ func setSeccomp(spec *specs.Spec) error {
 		return libseccomp.CompareInvalid
 	}
 
-	filter, err := libseccomp.NewFilter(mapAction(spec.Linux.Seccomp.DefaultAction, nil))
+	filter, err := libseccomp.NewFilter(mapAction(spec.Linux.Seccomp.DefaultAction, spec.Linux.Seccomp.DefaultErrnoRet))
 	if err != nil {
 		return errors.Wrapf(err, "error creating seccomp filter with default action %q", spec.Linux.Seccomp.DefaultAction)
 	}
@@ -168,6 +171,30 @@ func setSeccomp(spec *specs.Spec) error {
 	filter.Release()
 	if err != nil {
 		return errors.Wrapf(err, "error activating seccomp filter")
+	}
+	return nil
+}
+
+func setupSeccomp(spec *specs.Spec, seccompProfilePath string) error {
+	switch seccompProfilePath {
+	case "unconfined":
+		spec.Linux.Seccomp = nil
+	case "":
+		seccompConfig, err := seccomp.GetDefaultProfile(spec)
+		if err != nil {
+			return errors.Wrapf(err, "loading default seccomp profile failed")
+		}
+		spec.Linux.Seccomp = seccompConfig
+	default:
+		seccompProfile, err := ioutil.ReadFile(seccompProfilePath)
+		if err != nil {
+			return errors.Wrapf(err, "opening seccomp profile (%s) failed", seccompProfilePath)
+		}
+		seccompConfig, err := seccomp.LoadProfile(string(seccompProfile), spec)
+		if err != nil {
+			return errors.Wrapf(err, "loading seccomp profile (%s) failed", seccompProfilePath)
+		}
+		spec.Linux.Seccomp = seccompConfig
 	}
 	return nil
 }
