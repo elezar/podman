@@ -9,8 +9,8 @@ require (
 	github.com/checkpoint-restore/checkpointctl v0.0.0-20211204171957-54b4ebfdb681
 	github.com/checkpoint-restore/go-criu/v5 v5.3.0
 	github.com/container-orchestrated-devices/container-device-interface v0.0.0-20210325223243-f99e8b6c10b9
-	github.com/containernetworking/cni v1.0.1
-	github.com/containernetworking/plugins v1.0.1
+	github.com/containernetworking/cni v1.1.2
+	github.com/containernetworking/plugins v1.2.0
 	github.com/containers/buildah v1.23.1
 	github.com/containers/common v0.46.1-0.20220110152253-5476e2b8dc46
 	github.com/containers/conmon v2.0.20+incompatible
@@ -18,7 +18,7 @@ require (
 	github.com/containers/ocicrypt v1.1.2
 	github.com/containers/psgo v1.7.1
 	github.com/containers/storage v1.37.1-0.20211213220314-73a749e4fec5
-	github.com/coreos/go-systemd/v22 v22.3.2
+	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/coreos/stream-metadata-go v0.0.0-20210225230131-70edb9eb47b3
 	github.com/cyphar/filepath-securejoin v0.2.3
 	github.com/davecgh/go-spew v1.1.1
@@ -31,7 +31,7 @@ require (
 	github.com/dtylman/scp v0.0.0-20181017070807-f3000a34aef4
 	github.com/fsnotify/fsnotify v1.5.1
 	github.com/ghodss/yaml v1.0.0
-	github.com/godbus/dbus/v5 v5.0.6
+	github.com/godbus/dbus/v5 v5.1.0
 	github.com/google/shlex v0.0.0-20181106134648-c34317bd91bf
 	github.com/google/uuid v1.3.0
 	github.com/gorilla/handlers v0.0.0-20150720190736-60c7bfde3e33
@@ -44,7 +44,7 @@ require (
 	github.com/moby/term v0.0.0-20210619224110-3f7ff695adc6
 	github.com/mrunalp/fileutils v0.5.0
 	github.com/onsi/ginkgo v1.16.5
-	github.com/onsi/gomega v1.17.0
+	github.com/onsi/gomega v1.24.2
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.0.3-0.20211202193544-a5463b7f9c84
 	github.com/opencontainers/runc v1.0.3
@@ -62,15 +62,15 @@ require (
 	github.com/uber/jaeger-client-go v2.30.0+incompatible
 	github.com/ulikunitz/xz v0.5.10
 	github.com/vbauerster/mpb/v6 v6.0.4
-	github.com/vishvananda/netlink v1.1.1-0.20210330154013-f5de75959ad5
+	github.com/vishvananda/netlink v1.2.1-beta.2
 	go.etcd.io/bbolt v1.3.6
-	golang.org/x/crypto v0.0.0-20210817164053-32db794688a5
-	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
-	golang.org/x/sys v0.0.0-20211214234402-4825e8c3871d
-	golang.org/x/text v0.3.7
+	golang.org/x/crypto v0.0.0-20210921155107-089bfa567519
+	golang.org/x/sync v0.0.0-20220722155255-886fb9371eb4
+	golang.org/x/sys v0.4.0
+	golang.org/x/text v0.5.0
 	google.golang.org/protobuf v1.27.1
 	gopkg.in/fsnotify.v1 v1.4.7 // indirect
-	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b
+	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.22.4
 	k8s.io/apimachinery v0.22.4
 )
