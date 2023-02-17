@@ -32,8 +32,8 @@ func (r *Runtime) Load(ctx context.Context, path string, options *LoadOptions) (
 		options = &LoadOptions{}
 	}
 
-	var loadErrors []error
-
+	// we have 4 functions, so a maximum of 4 errors
+	loadErrors := make([]error, 0, 4)
 	for _, f := range []func() ([]string, string, error){
 		// OCI
 		func() ([]string, string, error) {
@@ -88,6 +88,8 @@ func (r *Runtime) Load(ctx context.Context, path string, options *LoadOptions) (
 	}
 
 	// Give a decent error message if nothing above worked.
+	// we want the colon here for the multiline error
+	//nolint:revive
 	loadError := fmt.Errorf("payload does not match any of the supported image formats:")
 	for _, err := range loadErrors {
 		loadError = fmt.Errorf("%v\n * %v", loadError, err)
@@ -97,7 +99,7 @@ func (r *Runtime) Load(ctx context.Context, path string, options *LoadOptions) (
 }
 
 // loadMultiImageDockerArchive loads the docker archive specified by ref.  In
-// case the path@reference notation was used, only the specifiec image will be
+// case the path@reference notation was used, only the specified image will be
 // loaded.  Otherwise, all images will be loaded.
 func (r *Runtime) loadMultiImageDockerArchive(ctx context.Context, ref types.ImageReference, options *CopyOptions) ([]string, error) {
 	// If we cannot stat the path, it either does not exist OR the correct
@@ -112,6 +114,11 @@ func (r *Runtime) loadMultiImageDockerArchive(ctx context.Context, ref types.Ima
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if err := reader.Close(); err != nil {
+			logrus.Errorf("Closing reader of docker archive: %v", err)
+		}
+	}()
 
 	refLists, err := reader.List()
 	if err != nil {
