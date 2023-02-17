@@ -2,21 +2,24 @@ package libimage
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/containers/common/libimage/manifests"
 	"github.com/containers/common/pkg/config"
 	"github.com/containers/common/pkg/retry"
 	"github.com/containers/image/v5/copy"
 	"github.com/containers/image/v5/docker/reference"
 	"github.com/containers/image/v5/pkg/compression"
 	"github.com/containers/image/v5/signature"
+	"github.com/containers/image/v5/signature/signer"
 	storageTransport "github.com/containers/image/v5/storage"
 	"github.com/containers/image/v5/types"
 	encconfig "github.com/containers/ocicrypt/config"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
@@ -26,8 +29,10 @@ const (
 )
 
 // LookupReferenceFunc return an image reference based on the specified one.
-// This can be used to pass custom blob caches to the copy operation.
-type LookupReferenceFunc func(ref types.ImageReference) (types.ImageReference, error)
+// The returned reference can return custom ImageSource or ImageDestination
+// objects which intercept or filter blobs, manifests, and signatures as
+// they are read and written.
+type LookupReferenceFunc = manifests.LookupReferenceFunc
 
 // CopyOptions allow for customizing image-copy operations.
 type CopyOptions struct {
@@ -95,9 +100,19 @@ type CopyOptions struct {
 	PolicyAllowStorage bool
 	// SignaturePolicyPath to overwrite the default one.
 	SignaturePolicyPath string
+	// If non-empty, asks for signatures to be added during the copy
+	// using the provided signers.
+	Signers []*signer.Signer
 	// If non-empty, asks for a signature to be added during the copy, and
 	// specifies a key ID.
 	SignBy string
+	// If non-empty, passphrase to use when signing with the key ID from SignBy.
+	SignPassphrase string
+	// If non-empty, asks for a signature to be added during the copy, using
+	// a sigstore private key file at the provided path.
+	SignBySigstorePrivateKeyFile string
+	// Passphrase to use when signing with SignBySigstorePrivateKeyFile.
+	SignSigstorePrivateKeyPassphrase []byte
 	// Remove any pre-existing signatures. SignBy will still add a new
 	// signature.
 	RemoveSignatures bool
@@ -136,7 +151,7 @@ type CopyOptions struct {
 // copier is an internal helper to conveniently copy images.
 type copier struct {
 	imageCopyOptions copy.Options
-	retryOptions     retry.RetryOptions
+	retryOptions     retry.Options
 	systemContext    *types.SystemContext
 	policyContext    *signature.PolicyContext
 
@@ -144,15 +159,13 @@ type copier struct {
 	destinationLookup LookupReferenceFunc
 }
 
-var (
-	// storageAllowedPolicyScopes overrides the policy for local storage
-	// to ensure that we can read images from it.
-	storageAllowedPolicyScopes = signature.PolicyTransportScopes{
-		"": []signature.PolicyRequirement{
-			signature.NewPRInsecureAcceptAnything(),
-		},
-	}
-)
+// storageAllowedPolicyScopes overrides the policy for local storage
+// to ensure that we can read images from it.
+var storageAllowedPolicyScopes = signature.PolicyTransportScopes{
+	"": []signature.PolicyRequirement{
+		signature.NewPRInsecureAcceptAnything(),
+	},
+}
 
 // getDockerAuthConfig extracts a docker auth config from the CopyOptions.  Returns
 // nil if no credentials are set.
@@ -290,7 +303,11 @@ func (r *Runtime) newCopier(options *CopyOptions) (*copier, error) {
 	c.imageCopyOptions.OciEncryptLayers = options.OciEncryptLayers
 	c.imageCopyOptions.OciDecryptConfig = options.OciDecryptConfig
 	c.imageCopyOptions.RemoveSignatures = options.RemoveSignatures
+	c.imageCopyOptions.Signers = options.Signers
 	c.imageCopyOptions.SignBy = options.SignBy
+	c.imageCopyOptions.SignPassphrase = options.SignPassphrase
+	c.imageCopyOptions.SignBySigstorePrivateKeyFile = options.SignBySigstorePrivateKeyFile
+	c.imageCopyOptions.SignSigstorePrivateKeyPassphrase = options.SignSigstorePrivateKeyPassphrase
 	c.imageCopyOptions.ReportWriter = options.Writer
 
 	defaultContainerConfig, err := config.Default()
@@ -342,12 +359,12 @@ func (c *copier) copy(ctx context.Context, source, destination types.ImageRefere
 	// Sanity checks for Buildah.
 	if sourceInsecure != nil && *sourceInsecure {
 		if c.systemContext.DockerInsecureSkipTLSVerify == types.OptionalBoolFalse {
-			return nil, errors.Errorf("can't require tls verification on an insecured registry")
+			return nil, fmt.Errorf("can't require tls verification on an insecured registry")
 		}
 	}
 	if destinationInsecure != nil && *destinationInsecure {
 		if c.systemContext.DockerInsecureSkipTLSVerify == types.OptionalBoolFalse {
-			return nil, errors.Errorf("can't require tls verification on an insecured registry")
+			return nil, fmt.Errorf("can't require tls verification on an insecured registry")
 		}
 	}
 
@@ -369,7 +386,7 @@ func (c *copier) copy(ctx context.Context, source, destination types.ImageRefere
 		}
 		return err
 	}
-	return returnManifest, retry.RetryIfNecessary(ctx, f, &c.retryOptions)
+	return returnManifest, retry.IfNecessary(ctx, f, &c.retryOptions)
 }
 
 // checkRegistrySourcesAllows checks the $BUILD_REGISTRY_SOURCES environment
@@ -401,7 +418,7 @@ func checkRegistrySourcesAllows(dest types.ImageReference) (insecure *bool, err 
 		AllowedRegistries  []string `json:"allowedRegistries,omitempty"`
 	}
 	if err := json.Unmarshal([]byte(registrySources), &sources); err != nil {
-		return nil, errors.Wrapf(err, "error parsing $BUILD_REGISTRY_SOURCES (%q) as JSON", registrySources)
+		return nil, fmt.Errorf("parsing $BUILD_REGISTRY_SOURCES (%q) as JSON: %w", registrySources, err)
 	}
 	blocked := false
 	if len(sources.BlockedRegistries) > 0 {
@@ -412,7 +429,7 @@ func checkRegistrySourcesAllows(dest types.ImageReference) (insecure *bool, err 
 		}
 	}
 	if blocked {
-		return nil, errors.Errorf("registry %q denied by policy: it is in the blocked registries list (%s)", reference.Domain(dref), registrySources)
+		return nil, fmt.Errorf("registry %q denied by policy: it is in the blocked registries list (%s)", reference.Domain(dref), registrySources)
 	}
 	allowed := true
 	if len(sources.AllowedRegistries) > 0 {
@@ -424,7 +441,7 @@ func checkRegistrySourcesAllows(dest types.ImageReference) (insecure *bool, err 
 		}
 	}
 	if !allowed {
-		return nil, errors.Errorf("registry %q denied by policy: not in allowed registries list (%s)", reference.Domain(dref), registrySources)
+		return nil, fmt.Errorf("registry %q denied by policy: not in allowed registries list (%s)", reference.Domain(dref), registrySources)
 	}
 
 	for _, inseureDomain := range sources.InsecureRegistries {
